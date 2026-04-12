@@ -56,6 +56,88 @@ llama.cpp を使ってローカルで動かす、テキストRPG母体です。
 - 起動中の AI は、ランチャー側で個別に名前とモデルを確認できます
 - 設定は `config/agentsProfile.json` に保存されます
 
+### 設定ファイルのイメージ
+
+複数 AI は、実際には「名前つきの起動設定の配列」として扱うと分かりやすいです。
+
+```json
+[
+  {
+    "id": "gm-1",
+    "name": "GM",
+    "model": "gemma-4-e4b-it-f16.gguf",
+    "enabled": true
+  },
+  {
+    "id": "judge-1",
+    "name": "Judge",
+    "model": "gemma-4-e2b-it-Q8_0.gguf",
+    "enabled": true
+  }
+]
+```
+
+この形にしておくと、ランチャーは各 AI を個別に起動しやすくなり、ゲーム側も `name` や `model` を見て役割分担を作れます。
+
+### 返答の拾い方
+
+現在の `game.js` では、入力を受け取るたびに `Promise.allSettled` で複数の AI に同じ質問を送っています。各 AI の返答は `askOneAgent()` の戻り値 `{ agentIndex, reply }` として受け取り、成功したものだけを後段で使います。
+
+```javascript
+const payload = {
+  model: "local-model",
+  messages: history,
+  temperature: 0.8,
+  max_tokens: 500
+};
+
+const tasks = [];
+for (let i = 0; i < agentCount; i += 1) {
+  tasks.push(askOneAgent(payload, i + 1));
+}
+
+const results = await Promise.allSettled(tasks);
+```
+
+この方式のポイントは、1回の入力に対して複数の AI が並列で返答できることです。たとえば、1体目を「GM」、2体目を「副官」、3体目を「判定役」として扱えます。
+
+```javascript
+const replies = results
+  .filter((result) => result.status === "fulfilled")
+  .map((result) => result.value.reply);
+
+const primaryReply = replies[0] ?? "応答なし";
+```
+
+`game.js` の今の実装では、最初に成功した返答を進行用に採用し、残りはログ表示や比較用に回せます。複数 AI をゲームの中で使う場合は、役割ごとに返答を分けると扱いやすくなります。
+
+```javascript
+async function askAgents(userText) {
+  const baseMessages = [
+    { role: "system", content: systemPrompt },
+    ...history,
+    { role: "user", content: userText }
+  ];
+
+  const payload = {
+    model: "local-model",
+    messages: baseMessages,
+    temperature: 0.8,
+    max_tokens: 500
+  };
+
+  const agentCount = 3;
+  const tasks = Array.from({ length: agentCount }, (_, index) => askOneAgent(payload, index + 1));
+  const results = await Promise.allSettled(tasks);
+
+  return results
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => result.value.reply);
+}
+```
+
+このとき、ゲームの正解判定や HP の増減はコード側で固定し、AI の返答は「演出」「会話」「提案」にだけ使うのが安全です。
+
 ## index.html / game.js の改変ポイント
 
 UIの見た目変更:
