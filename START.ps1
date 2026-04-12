@@ -41,14 +41,6 @@ function Invoke-Launcher {
     [string]$LauncherScriptPath
   )
 
-  if (Test-Path -LiteralPath $LauncherExePath -PathType Leaf) {
-    $exeProc = Start-Process -FilePath $LauncherExePath -PassThru -Wait
-    if ($exeProc.ExitCode -ne 0) {
-      throw "Launcher exe exited with code $($exeProc.ExitCode)."
-    }
-    return
-  }
-
   $psExe = "powershell.exe"
   $args = @(
     "-NoProfile",

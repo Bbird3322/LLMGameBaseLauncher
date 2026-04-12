@@ -34,20 +34,35 @@ function Stop-TrackedProcess {
   )
 
   $state = Read-JsonFile -Path $StateFile
-  if (-not $state -or -not $state.pid) {
+  if (-not $state) {
     Write-Output "[INFO] $Name was not tracked."
     return
   }
 
-  try {
-    $process = Get-Process -Id ([int]$state.pid) -ErrorAction Stop
-    Stop-Process -Id $process.Id -Force -ErrorAction Stop
-    Write-Output "[OK] Stopped $Name (PID $($process.Id))."
-  } catch {
-    Write-Output "[INFO] $Name was already stopped."
-  } finally {
-    Remove-StateFile -Path $StateFile
+  $entries = @()
+  if ($state.pid) {
+    $entries = @($state)
+  } elseif ($state.processes) {
+    $entries = @($state.processes)
   }
+
+  if ($entries.Count -eq 0) {
+    Write-Output "[INFO] $Name was not tracked."
+    return
+  }
+
+  foreach ($entry in $entries) {
+    if (-not $entry.pid) { continue }
+    try {
+      $process = Get-Process -Id ([int]$entry.pid) -ErrorAction Stop
+      Stop-Process -Id $process.Id -Force -ErrorAction Stop
+      Write-Output "[OK] Stopped $Name (PID $($process.Id))."
+    } catch {
+      Write-Output "[INFO] $Name was already stopped."
+    }
+  }
+
+  Remove-StateFile -Path $StateFile
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

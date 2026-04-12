@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -142,57 +142,82 @@ function Stop-TrackedProcess {
 	param([string]$StateFile)
 
 	$state = Read-JsonFile -Path $StateFile
-	if (-not $state -or -not $state.pid) {
+	if (-not $state) {
 		return
 	}
 
-	try {
-		$proc = Get-Process -Id ([int]$state.pid) -ErrorAction Stop
-		Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-		Start-Sleep -Milliseconds 400
-	} catch {}
+	$entries = @()
+	if ($state.pid) {
+		$entries = @($state)
+	} elseif ($state.processes) {
+		$entries = @($state.processes)
+	}
+
+	foreach ($entry in $entries) {
+		if (-not $entry.pid) { continue }
+		try {
+			$proc = Get-Process -Id ([int]$entry.pid) -ErrorAction Stop
+			Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+			Start-Sleep -Milliseconds 400
+		} catch {}
+	}
 }
 
-function Start-LlamaServerHidden {
+function Start-LlamaServersHidden {
 	param(
 		[hashtable]$EnvMap,
+		[array]$Agents,
 		[string]$StateFile
 	)
 
-	$serverUrl = "http://{0}:{1}" -f $EnvMap.LLAMA_HOST, $EnvMap.LLAMA_PORT
-	$healthUrl = "$serverUrl/health"
-	$state = Read-JsonFile -Path $StateFile
-
-	if ((Test-LlamaServerHealth -EnvMap $EnvMap) -and $state -and $state.modelPath -eq $EnvMap.LLAMA_MODEL_PATH -and $state.ngl -eq $EnvMap.LLAMA_NGL) {
-		return $true
-	}
-
 	Stop-TrackedProcess -StateFile $StateFile
 
-	$args = @(
-		'-m', $EnvMap.LLAMA_MODEL_PATH,
-		'--host', $EnvMap.LLAMA_HOST,
-		'--port', $EnvMap.LLAMA_PORT,
-		'-c', $EnvMap.LLAMA_CTX,
-		'-ngl', $EnvMap.LLAMA_NGL
-	)
+	$processStates = @()
+	foreach ($agent in @($Agents)) {
+		$agentEnv = @{}
+		foreach ($key in $EnvMap.Keys) {
+			$agentEnv[$key] = $EnvMap[$key]
+		}
 
-	if ($EnvMap.LLAMA_EXTRA_ARGS) {
-		$args += ($EnvMap.LLAMA_EXTRA_ARGS -split '\\s+' | Where-Object { $_ })
+		$agentEnv.LLAMA_MODEL_PATH = [string]$agent.modelPath
+		$agentEnv.LLAMA_PORT = [string]$agent.llamaPort
+		$agentEnv.LLAMA_CTX = [string]$agent.llamaCtx
+		$agentEnv.LLAMA_NGL = [string]$agent.llamaNgl
+
+		$serverUrl = "http://{0}:{1}" -f $agentEnv.LLAMA_HOST, $agentEnv.LLAMA_PORT
+		$healthUrl = "$serverUrl/health"
+
+		$args = @(
+			'-m', $agentEnv.LLAMA_MODEL_PATH,
+			'--host', $agentEnv.LLAMA_HOST,
+			'--port', $agentEnv.LLAMA_PORT,
+			'-c', $agentEnv.LLAMA_CTX,
+			'-ngl', $agentEnv.LLAMA_NGL
+		)
+
+		if ($agentEnv.LLAMA_EXTRA_ARGS) {
+			$args += ($agentEnv.LLAMA_EXTRA_ARGS -split '\\s+' | Where-Object { $_ })
+		}
+
+		$proc = Start-Process -FilePath $agentEnv.LLAMA_CPP_EXE -ArgumentList $args -WindowStyle Hidden -PassThru
+		$processStates += [ordered]@{
+			id        = [string]$agent.id
+			name      = [string]$agent.name
+			pid       = $proc.Id
+			startedAt = (Get-Date).ToString("o")
+			modelPath = $agentEnv.LLAMA_MODEL_PATH
+			ngl       = $agentEnv.LLAMA_NGL
+			url       = $serverUrl
+		}
+
+		if (-not (Wait-HttpReady -Url $healthUrl -Attempts 30 -DelayMs 1000)) {
+			Write-JsonFile -Path $StateFile -Data ([ordered]@{ processes = $processStates })
+			return $false
+		}
 	}
 
-	$proc = Start-Process -FilePath $EnvMap.LLAMA_CPP_EXE -ArgumentList $args -WindowStyle Hidden -PassThru
-
-	$stateObj = [ordered]@{
-		pid       = $proc.Id
-		startedAt = (Get-Date).ToString("o")
-		modelPath = $EnvMap.LLAMA_MODEL_PATH
-		ngl       = $EnvMap.LLAMA_NGL
-		url       = $serverUrl
-	}
-	Write-JsonFile -Path $StateFile -Data $stateObj
-
-	return Wait-HttpReady -Url $healthUrl -Attempts 30 -DelayMs 1000
+	Write-JsonFile -Path $StateFile -Data ([ordered]@{ processes = $processStates })
+	return $true
 }
 
 function Ensure-GameServer {
@@ -305,12 +330,19 @@ try {
 }
 
 function Get-SystemInfoText {
-	$gpu = Get-CimInstance Win32_VideoController |
-		Where-Object { $_.AdapterRAM -gt 0 } |
-		Sort-Object AdapterRAM -Descending |
-		Select-Object -First 1
+	$gpu = $null
+	$ram = $null
+	try {
+		$gpu = Get-CimInstance Win32_VideoController |
+			Where-Object { $_.AdapterRAM -gt 0 } |
+			Sort-Object AdapterRAM -Descending |
+			Select-Object -First 1
+	} catch {}
 
-	$ram = Get-CimInstance Win32_ComputerSystem
+	try {
+		$ram = Get-CimInstance Win32_ComputerSystem
+	} catch {}
+
 	$ramGiB = if ($ram.TotalPhysicalMemory) { [math]::Round(([int64]$ram.TotalPhysicalMemory / 1GB), 2) } else { 0 }
 	$gpuText = if ($gpu) {
 		"GPU: {0} ({1} GiB VRAM)" -f $gpu.Name, [math]::Round(([int64]$gpu.AdapterRAM / 1GB), 2)
@@ -1161,11 +1193,13 @@ $startButton.Add_Click({
 		}
 
 		$primary = $active[0]
-		if ([string]::IsNullOrWhiteSpace([string]$primary.modelPath)) {
-			throw "選択されたAIにモデルパスがありません。"
-		}
-		if (-not (Test-Path -LiteralPath $primary.modelPath -PathType Leaf)) {
-			throw "モデルファイルが存在しません: $($primary.modelPath)"
+		foreach ($agent in @($active)) {
+			if ([string]::IsNullOrWhiteSpace([string]$agent.modelPath)) {
+				throw "選択されたAIにモデルパスがありません。"
+			}
+			if (-not (Test-Path -LiteralPath $agent.modelPath -PathType Leaf)) {
+				throw "モデルファイルが存在しません: $($agent.modelPath)"
+			}
 		}
 
 		$envMap.LLAMA_CPP_EXE = $exePathBox.Text.Trim()
@@ -1191,13 +1225,13 @@ $startButton.Add_Click({
 		$activeIds = @($active | ForEach-Object { [string]$_.id })
 		Write-RuntimeProfile -ProfilePath $runtimeProfileFile -EnvMap $envMap -Agents $agents -ActiveAgentIds $activeIds
 
-		$statusLabel.Text = "llama-server 起動中..."
-		$ok = Start-LlamaServerHidden -EnvMap $envMap -StateFile $llamaStateFile
+		$statusLabel.Text = ("llama-server 起動中... ({0} instance(s))" -f $active.Count)
+		$ok = Start-LlamaServersHidden -EnvMap $envMap -Agents $active -StateFile $llamaStateFile
 		if (-not $ok) {
 			throw "llama-server did not become ready within 30 seconds."
 		}
 
-		$statusLabel.Text = ("Ready: {0}" -f [System.IO.Path]::GetFileName([string]$envMap.LLAMA_MODEL_PATH))
+		$statusLabel.Text = ("Ready: {0} instance(s)" -f $active.Count)
 
 		$go = [System.Windows.Forms.MessageBox]::Show(
 			$form,
