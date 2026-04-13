@@ -7,3 +7,10 @@ scripts/llama-server.env.bat
 
 # Optional local overrides
 *.local
+
+# Build temp files
+*.TMP
+*.tmp
+
+# Local model binaries
+*.gguf

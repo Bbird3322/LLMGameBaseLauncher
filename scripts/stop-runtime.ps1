@@ -1,6 +1,7 @@
 param(
   [switch]$LlamaOnly,
-  [switch]$GameOnly
+  [switch]$GameOnly,
+  [string]$RootDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -65,7 +66,11 @@ function Stop-TrackedProcess {
   Remove-StateFile -Path $StateFile
 }
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scriptDir = if (-not [string]::IsNullOrWhiteSpace($RootDir)) {
+  Join-Path $RootDir "scripts"
+} else {
+  Split-Path -Parent $MyInvocation.MyCommand.Path
+}
 $llamaStateFile = Join-Path $scriptDir "llama-server.state.json"
 $gameStateFile = Join-Path $scriptDir "game-server.state.json"
 

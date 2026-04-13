@@ -112,10 +112,39 @@ function Save-UiSettings {
 	})
 }
 
+function Get-RootDirSafe {
+	if (-not [string]::IsNullOrWhiteSpace([string]$script:rootDir)) {
+		return [string]$script:rootDir
+	}
+
+	$baseScriptDir = if (-not [string]::IsNullOrWhiteSpace([string]$script:scriptDir)) {
+		[string]$script:scriptDir
+	} else {
+		Get-ScriptDir
+	}
+
+	if (-not [string]::IsNullOrWhiteSpace($baseScriptDir)) {
+		try {
+			return [string](Resolve-Path (Join-Path $baseScriptDir ".."))
+		} catch {}
+	}
+
+	try {
+		return [string](Resolve-Path ".")
+	} catch {
+		return ""
+	}
+}
+
 function Backup-ConfigSnapshot {
 	param([string]$Reason = "manual")
 
-	$backupDir = Join-Path $rootDir "config\backups"
+	$resolvedRootDir = Get-RootDirSafe
+	if ([string]::IsNullOrWhiteSpace($resolvedRootDir)) {
+		throw "Project root directory could not be resolved."
+	}
+
+	$backupDir = Join-Path $resolvedRootDir "config\backups"
 	if (-not (Test-Path -LiteralPath $backupDir -PathType Container)) {
 		New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
 	}
@@ -448,11 +477,22 @@ function Invoke-ExternalCommand {
 	param(
 		[string]$FilePath,
 		[string[]]$Arguments,
-		[string]$WorkingDirectory = $rootDir
+		[string]$WorkingDirectory = ""
 	)
 
+	$resolvedWorkingDirectory = if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) { Get-RootDirSafe } else { $WorkingDirectory }
+	if ([string]::IsNullOrWhiteSpace($resolvedWorkingDirectory)) {
+		return [pscustomobject]@{
+			Success  = $false
+			ExitCode = -1
+			Output   = "Working directory could not be resolved."
+		}
+	}
+
+	$pushedLocation = $false
 	try {
-		Push-Location -LiteralPath $WorkingDirectory
+		Push-Location -LiteralPath $resolvedWorkingDirectory
+		$pushedLocation = $true
 		$output = & $FilePath @Arguments 2>&1 | ForEach-Object { [string]$_ }
 		$exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
 		return [pscustomobject]@{
@@ -467,7 +507,9 @@ function Invoke-ExternalCommand {
 			Output   = (($_ | Out-String).Trim())
 		}
 	} finally {
-		Pop-Location
+		if ($pushedLocation) {
+			Pop-Location
+		}
 	}
 }
 
@@ -493,7 +535,12 @@ function Get-RepositoryUpdateStatus {
 		return [pscustomobject]$status
 	}
 
-	$repoMarker = Join-Path $rootDir ".git"
+	$resolvedRootDir = Get-RootDirSafe
+	if ([string]::IsNullOrWhiteSpace($resolvedRootDir)) {
+		return [pscustomobject]$status
+	}
+
+	$repoMarker = Join-Path $resolvedRootDir ".git"
 	if (-not (Test-Path -LiteralPath $repoMarker)) {
 		return [pscustomobject]$status
 	}
@@ -631,7 +678,7 @@ function Invoke-RepositoryUpdate {
 
 	$buildSuccess = $true
 	if ($RebuildExe) {
-		$buildScript = Join-Path $rootDir "scripts\build-exe.ps1"
+		$buildScript = Join-Path (Get-RootDirSafe) "scripts\build-exe.ps1"
 		if (Test-Path -LiteralPath $buildScript -PathType Leaf) {
 			$buildResult = Invoke-ExternalCommand -FilePath "powershell.exe" -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $buildScript)
 			$details += ""
@@ -1036,6 +1083,58 @@ function Save-LaunchProfiles {
 		generatedAt = (Get-Date).ToString("o")
 		profiles    = @($Profiles)
 	})
+}
+
+function Get-BootConfigState {
+	return [ordered]@{
+		modelFolder      = [string]$modelFolderBox.Text.Trim()
+		cpuExePath       = [string]$exeCpuPathBox.Text.Trim()
+		gpuExePath       = [string]$exeGpuPathBox.Text.Trim()
+		selectedMode     = if ($cpuRadio.Checked) { "cpu" } else { "gpu" }
+		defaultHost      = [string]$script:envMap.LLAMA_HOST
+		defaultPort      = [string]$script:envMap.LLAMA_PORT
+		defaultNgl       = [string]$script:envMap.LLAMA_NGL
+		defaultCtx       = [string]$script:envMap.LLAMA_CTX
+		defaultExtraArgs = [string]$script:envMap.LLAMA_EXTRA_ARGS
+	}
+}
+
+function Save-BootConfigState {
+	param([string]$Path)
+
+	Write-JsonFile -Path $Path -Data ([ordered]@{
+		generatedAt = (Get-Date).ToString("o")
+		boot        = Get-BootConfigState
+	})
+}
+
+function Get-SavedBootConfigState {
+	param([string]$Path)
+
+	$defaults = [ordered]@{
+		modelFolder      = [string]$modelsDir
+		cpuExePath       = [string]$script:envMap.LLAMA_CPP_EXE_CPU
+		gpuExePath       = [string]$script:envMap.LLAMA_CPP_EXE_GPU
+		selectedMode     = if ([string]$script:envMap.LLAMA_NGL -eq "0") { "cpu" } else { "gpu" }
+		defaultHost      = [string]$script:envMap.LLAMA_HOST
+		defaultPort      = [string]$script:envMap.LLAMA_PORT
+		defaultNgl       = [string]$script:envMap.LLAMA_NGL
+		defaultCtx       = [string]$script:envMap.LLAMA_CTX
+		defaultExtraArgs = [string]$script:envMap.LLAMA_EXTRA_ARGS
+	}
+
+	$data = Read-JsonFile -Path $Path
+	if (-not $data -or -not $data.boot) {
+		return [pscustomobject]$defaults
+	}
+
+	foreach ($k in @($defaults.Keys)) {
+		if ($data.boot.PSObject.Properties.Name -contains $k) {
+			$defaults[$k] = [string]$data.boot.$k
+		}
+	}
+
+	return [pscustomobject]$defaults
 }
 
 function Capture-CurrentProfileData {
@@ -1558,8 +1657,10 @@ function Repair-AgentEntries {
 	return $changed
 }
 
-$scriptDir = Get-ScriptDir
-$rootDir = [string](Resolve-Path (Join-Path $scriptDir ".."))
+$script:scriptDir = Get-ScriptDir
+$script:rootDir = [string](Resolve-Path (Join-Path $script:scriptDir ".."))
+$scriptDir = $script:scriptDir
+$rootDir = $script:rootDir
 $modelsDir = Join-Path $rootDir "llama-runtime\models"
 if (-not (Test-Path -LiteralPath $modelsDir -PathType Container)) {
 	$modelsDir = Join-Path $rootDir "models"
@@ -1569,6 +1670,7 @@ $bundledCpuDir = Join-Path $bundledRuntimeDir "cpu"
 $bundledGpuDir = Join-Path $bundledRuntimeDir "gpu"
 $bundledBinDir = Join-Path $rootDir "llama-runtime\bin"
 $envFile = Join-Path $scriptDir "llama-server.env.bat"
+$bootConfigFile = Join-Path $rootDir "config\\bootSettings.json"
 $runtimeProfileFile = Join-Path $rootDir "config\\runtimeProfile.json"
 $agentProfileFile = Join-Path $rootDir "config\\agentsProfile.json"
 $uiSettingsFile = Join-Path $rootDir "config\\uiSettings.json"
@@ -1600,6 +1702,8 @@ $script:envMap.LLAMA_NGL = if (-not (Test-NvidiaGpuDetected)) { "0" } elseif ([s
 if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
 	Save-EnvMap -EnvFile $envFile -EnvMap $script:envMap
 }
+$script:savedBootConfig = $null
+$script:savedBootConfig = Get-SavedBootConfigState -Path $bootConfigFile
 $script:launchProfiles = @(Get-LaunchProfiles -Path $launchProfilesFile)
 $models = Get-Models -ModelsDir $modelsDir
 $script:agents = @(Load-Agents -Path $agentProfileFile -Models $models -EnvMap $envMap)
@@ -2435,11 +2539,22 @@ function Set-LanguageCombo {
 }
 
 function Update-BootUnsavedWarning {
-	$currentCpuExe = [string]$exeCpuPathBox.Text.Trim()
-	$currentGpuExe = [string]$exeGpuPathBox.Text.Trim()
-	$savedCpuExe = [string]$script:envMap.LLAMA_CPP_EXE_CPU
-	$savedGpuExe = [string]$script:envMap.LLAMA_CPP_EXE_GPU
-	$bootUnsavedLabel.Visible = ($currentCpuExe -ne $savedCpuExe) -or ($currentGpuExe -ne $savedGpuExe)
+	if (-not $script:savedBootConfig) {
+		$script:savedBootConfig = Get-SavedBootConfigState -Path $bootConfigFile
+	}
+
+	$current = Get-BootConfigState
+	$saved = $script:savedBootConfig
+	$bootUnsavedLabel.Visible =
+		([string]$current.modelFolder -ne [string]$saved.modelFolder) -or
+		([string]$current.cpuExePath -ne [string]$saved.cpuExePath) -or
+		([string]$current.gpuExePath -ne [string]$saved.gpuExePath) -or
+		([string]$current.selectedMode -ne [string]$saved.selectedMode) -or
+		([string]$current.defaultHost -ne [string]$saved.defaultHost) -or
+		([string]$current.defaultPort -ne [string]$saved.defaultPort) -or
+		([string]$current.defaultNgl -ne [string]$saved.defaultNgl) -or
+		([string]$current.defaultCtx -ne [string]$saved.defaultCtx) -or
+		([string]$current.defaultExtraArgs -ne [string]$saved.defaultExtraArgs)
 }
 
 function Update-AiUnsavedWarning {
@@ -3161,12 +3276,14 @@ $cpuRadio.Add_CheckedChanged({
 	if ($cpuRadio.Checked) {
 		Sync-ExePathByMode
 	}
+	Update-BootUnsavedWarning
 })
 $gpuRadio.Add_CheckedChanged({
 	Update-EstimateLabel
 	if ($gpuRadio.Checked) {
 		Sync-ExePathByMode
 	}
+	Update-BootUnsavedWarning
 })
 $exeCpuPathBox.Add_TextChanged({
 	$script:envMap.LLAMA_CPP_EXE_CPU = $exeCpuPathBox.Text.Trim()
@@ -3177,6 +3294,10 @@ $exeCpuPathBox.Add_TextChanged({
 $exeGpuPathBox.Add_TextChanged({
 	$script:envMap.LLAMA_CPP_EXE_GPU = $exeGpuPathBox.Text.Trim()
 	Refresh-HardwareStatusLabels
+	Update-BootUnsavedWarning
+})
+
+$modelFolderBox.Add_TextChanged({
 	Update-BootUnsavedWarning
 })
 
@@ -3299,6 +3420,8 @@ $saveBootButton.Add_Click({
 	$script:envMap.LLAMA_CPP_EXE_CPU = $exeCpuPathBox.Text.Trim()
 	$script:envMap.LLAMA_CPP_EXE_GPU = $exeGpuPathBox.Text.Trim()
 	Save-EnvMap -EnvFile $envFile -EnvMap $script:envMap
+	Save-BootConfigState -Path $bootConfigFile
+	$script:savedBootConfig = Get-SavedBootConfigState -Path $bootConfigFile
 	Update-BootUnsavedWarning
 	$statusLabel.Text = Get-UiText "savedBoot"
 })

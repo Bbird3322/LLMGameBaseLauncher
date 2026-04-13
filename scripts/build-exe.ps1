@@ -9,6 +9,13 @@ function Get-RootDir {
 }
 
 function Ensure-Ps2Exe {
+  $env:PSExecutionPolicyPreference = 'Bypass'
+
+  $cmd = Get-Command Invoke-ps2exe -ErrorAction SilentlyContinue
+  if ($cmd) {
+    return
+  }
+
   try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
   } catch {
@@ -26,11 +33,6 @@ function Ensure-Ps2Exe {
     Write-Verbose "Failed to set PSGallery trust policy: $($_.Exception.Message)"
   }
 
-  $cmd = Get-Command Invoke-ps2exe -ErrorAction SilentlyContinue
-  if ($cmd) {
-    return
-  }
-
   $module = Get-Module -ListAvailable ps2exe | Select-Object -First 1
   if (-not $module) {
     Install-Module ps2exe -Scope CurrentUser -Repository PSGallery -Force -AllowClobber -AcceptLicense -Confirm:$false
@@ -45,13 +47,12 @@ function Ensure-Ps2Exe {
 }
 
 $rootDir = Get-RootDir
-$startPs1 = Join-Path $rootDir "START.ps1"
-$startExe = Join-Path $rootDir "START.exe"
+$startPs1 = Join-Path $rootDir "release\LauncherEntry.ps1"
+$startExe = Join-Path $rootDir "LLMGameBaseLauncher.exe"
 $launcherPs1 = Join-Path $rootDir "scripts\launch-llama-server.ps1"
-$launcherExe = Join-Path $rootDir "scripts\launch-llama-server.exe"
 
 if (-not (Test-Path -LiteralPath $startPs1 -PathType Leaf)) {
-  throw "START.ps1 not found: $startPs1"
+  throw "release\\LauncherEntry.ps1 not found: $startPs1"
 }
 if (-not (Test-Path -LiteralPath $launcherPs1 -PathType Leaf)) {
   throw "launch-llama-server.ps1 not found: $launcherPs1"
@@ -59,9 +60,7 @@ if (-not (Test-Path -LiteralPath $launcherPs1 -PathType Leaf)) {
 
 Ensure-Ps2Exe
 
-Invoke-ps2exe -inputFile $launcherPs1 -outputFile $launcherExe -x64 -STA -noConsole -title "LLM Game Base Launcher"
-Invoke-ps2exe -inputFile $startPs1 -outputFile $startExe -x64 -STA -noConsole -title "LLM Game Base Start"
+Invoke-ps2exe -inputFile $startPs1 -outputFile $startExe -x64 -STA -noConsole -title "LLM Game Base Launcher"
 
 Write-Output "Built:"
-Write-Output "  $launcherExe"
 Write-Output "  $startExe"
