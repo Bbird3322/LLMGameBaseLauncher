@@ -25,7 +25,7 @@
 
 ## 最初の手順
 
-1. `.gguf` ファイルを `llama-runtime\models\` に置く
+1. `.gguf` ファイルを[Hugging-Face](https://huggingface.co/)もしくはファイル内のダウンローダ `HF-GGUF-Downloader.exe` から `llama-runtime\models\` に置く
 2. `LLMGameBaseLauncher.exe` を起動する
 3. EXE がない場合は `test\START.bat` を使う
 4. ランチャーでモデルを選ぶ
