@@ -4,9 +4,11 @@ scripts/game-server.state.json
 config/**
 scripts/llama-server.env.bat
 logs/**
+.vscode/**
 
 # Optional local overrides
 *.local
+*.gitignore
 
 # Build temp files
 *.TMP
