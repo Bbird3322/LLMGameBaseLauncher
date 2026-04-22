@@ -569,4 +569,4 @@ async function sendTurn() {
 - 拡張子が `.gguf` になっているか確認する
 
 ## ライセンス
-本製品は Apache License 2.0 および MIT License の第三者コンポーネントを含みます。詳細は [THIRD_PARTY_NOTICES.txt](<./licence/THIRD_PARTY_NOTICES.txt>) を参照してください
+本製品は MIT License の第三者コンポーネントを含みます。詳細は [THIRD_PARTY_NOTICES.txt](<./licence/THIRD_PARTY_NOTICES.txt>) を参照してください

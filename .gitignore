@@ -16,3 +16,5 @@ logs/**
 
 # Local model binaries
 *.gguf
+
+claude.md

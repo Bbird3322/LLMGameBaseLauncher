@@ -1,4 +1,5 @@
 ﻿$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -42,6 +43,69 @@ function Get-HfHeaders {
     $headers["Authorization"] = "Bearer $Token"
   }
   return $headers
+}
+
+function Invoke-HfHttpRequest {
+  param(
+    [string]$Uri,
+    [string]$Token = "",
+    [string]$Method = "GET"
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Uri)) {
+    throw "Uri is required."
+  }
+
+  $request = [System.Net.HttpWebRequest]::Create($Uri)
+  $request.Method = $Method
+  $request.AllowAutoRedirect = $true
+  $request.UserAgent = "HF-GGUF-Downloader/0.3"
+  $request.Accept = "application/json, text/plain, */*"
+  $request.Timeout = 30000
+  $request.ReadWriteTimeout = 30000
+  if (-not [string]::IsNullOrWhiteSpace($Token)) {
+    $request.Headers["Authorization"] = "Bearer $Token"
+  }
+
+  $response = $null
+  $stream = $null
+  $reader = $null
+  try {
+    $response = [System.Net.HttpWebResponse]$request.GetResponse()
+    $stream = $response.GetResponseStream()
+
+    $encoding = [System.Text.Encoding]::UTF8
+    if (-not [string]::IsNullOrWhiteSpace([string]$response.CharacterSet)) {
+      try {
+        $encoding = [System.Text.Encoding]::GetEncoding([string]$response.CharacterSet)
+      } catch {}
+    }
+
+    $reader = New-Object System.IO.StreamReader($stream, $encoding)
+    return [pscustomobject]@{
+      Content    = $reader.ReadToEnd()
+      Headers    = $response.Headers
+      StatusCode = [int]$response.StatusCode
+    }
+  } finally {
+    if ($reader) { $reader.Dispose() }
+    elseif ($stream) { $stream.Dispose() }
+    if ($response) { $response.Dispose() }
+  }
+}
+
+function Invoke-HfJsonRequest {
+  param(
+    [string]$Uri,
+    [string]$Token = ""
+  )
+
+  $response = Invoke-HfHttpRequest -Uri $Uri -Token $Token -Method "GET"
+  if ([string]::IsNullOrWhiteSpace([string]$response.Content)) {
+    return $null
+  }
+
+  return ([string]$response.Content | ConvertFrom-Json)
 }
 
 function ConvertFrom-HfApiJson {
@@ -147,7 +211,7 @@ function Get-HfLlamaCppModels {
   $nextUri = "https://huggingface.co/api/models?filter=llama.cpp&sort=downloads&direction=-1&limit=$pageSize"
 
   while (-not [string]::IsNullOrWhiteSpace($nextUri)) {
-    $response = Invoke-WebRequest -Uri $nextUri -Headers (Get-HfHeaders -Token "") -Method Get -UseBasicParsing
+    $response = Invoke-HfHttpRequest -Uri $nextUri
     $items = @(ConvertFrom-HfApiJson -Content $response.Content)
     if ($items.Count -eq 0) {
       break
@@ -724,6 +788,28 @@ $body
 "@
 }
 
+function Convert-MarkdownToDisplayText {
+  param([string]$Markdown)
+
+  if ([string]::IsNullOrWhiteSpace($Markdown)) {
+    return "No description available."
+  }
+
+  $text = ([string]$Markdown) -replace "`r`n", "`n" -replace "`r", "`n"
+  $text = [regex]::Replace($text, '^\s*```.*$', '', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+  $text = [regex]::Replace($text, '^\s{0,3}#{1,6}\s*', '', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+  $text = [regex]::Replace($text, '^\s*[-*]\s+', '- ', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+  $text = [regex]::Replace($text, '\[([^\]]+)\]\((https?://[^)]+)\)', '$1 <$2>')
+  $text = [regex]::Replace($text, '<(https?://[^>]+)>', '$1')
+  $text = [regex]::Replace($text, '\*\*([^*]+)\*\*', '$1')
+  $text = [regex]::Replace($text, '__([^_]+)__', '$1')
+  $text = [regex]::Replace($text, '`([^`]+)`', '$1')
+  $text = [regex]::Replace($text, '(?<!\*)\*([^*]+)\*(?!\*)', '$1')
+  $text = [regex]::Replace($text, '(?<!_)_([^_]+)_(?!_)', '$1')
+  $text = [regex]::Replace($text, "`n{3,}", "`n`n")
+  return $text.Trim()
+}
+
 function Get-HfModelDescriptionText {
   param([object]$Response)
 
@@ -903,7 +989,7 @@ function Get-HfModelCardText {
     foreach ($readmePath in $readmeCandidates) {
       try {
         $readmeUrl = "https://huggingface.co/$RepoId/resolve/$Revision/$readmePath"
-        $readmeResponse = Invoke-WebRequest -Uri $readmeUrl -Headers (Get-HfHeaders -Token $Token) -Method Get -UseBasicParsing
+        $readmeResponse = Invoke-HfHttpRequest -Uri $readmeUrl -Token $Token
         $readmeText = [string]$readmeResponse.Content
         if (-not [string]::IsNullOrWhiteSpace($readmeText)) {
           return (Remove-MarkdownFrontMatter -Markdown $readmeText).Trim()
@@ -1025,7 +1111,7 @@ function Open-InstallRepo {
   $globalActionButton.Visible = $true
   $globalActionButton.Text = Get-UiText "FetchFiles"
   $filesListView.Items.Clear()
-  $descriptionBrowser.DocumentText = (Convert-MarkdownToHtml -Markdown "")
+  $descriptionBrowser.Text = (Convert-MarkdownToDisplayText -Markdown "")
   $script:repoFiles = @()
   $saveTextBox.Text = ""
   $progressBar.Value = 0
@@ -1082,7 +1168,7 @@ function Get-HfModelFiles {
 
   $repoId = $RepoId.Trim()
   $uri = "https://huggingface.co/api/models/$repoId"
-  $response = Invoke-RestMethod -Uri $uri -Headers (Get-HfHeaders -Token $Token) -Method Get
+  $response = Invoke-HfJsonRequest -Uri $uri -Token $Token
 
   if (-not $response -or -not $response.siblings) {
     return [pscustomobject]@{
@@ -1630,13 +1716,15 @@ $filesLabel.Location = New-Object System.Drawing.Point(4, 44)
 $filesLabel.Size = New-Object System.Drawing.Size(160, 20)
 $installPanel.Controls.Add($filesLabel)
 
-$descriptionBrowser = New-Object System.Windows.Forms.WebBrowser
+$descriptionBrowser = New-Object System.Windows.Forms.RichTextBox
 $descriptionBrowser.Location = New-Object System.Drawing.Point(4, 68)
 $descriptionBrowser.Size = New-Object System.Drawing.Size(448, 360)
-$descriptionBrowser.AllowWebBrowserDrop = $false
-$descriptionBrowser.IsWebBrowserContextMenuEnabled = $true
-$descriptionBrowser.WebBrowserShortcutsEnabled = $true
-$descriptionBrowser.ScriptErrorsSuppressed = $true
+$descriptionBrowser.ReadOnly = $true
+$descriptionBrowser.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+$descriptionBrowser.BackColor = [System.Drawing.Color]::White
+$descriptionBrowser.ForeColor = [System.Drawing.Color]::FromArgb(36, 52, 71)
+$descriptionBrowser.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$descriptionBrowser.DetectUrls = $true
 $installPanel.Controls.Add($descriptionBrowser)
 
 $downloadFilesLabel = New-Object System.Windows.Forms.Label
@@ -1962,7 +2050,7 @@ function Load-RepoFiles {
 
   $downloadButton.Enabled = $false
   $filesListView.Items.Clear()
-  $descriptionBrowser.DocumentText = (Convert-MarkdownToHtml -Markdown "")
+  $descriptionBrowser.Text = (Convert-MarkdownToDisplayText -Markdown "")
   $script:repoFiles = @()
   $progressBar.Value = 0
   $installStatusLabel.Text = Get-UiText "LoadingFiles"
@@ -1995,7 +2083,7 @@ function Load-RepoFiles {
   $licenseInfoLabel.Text = ("{0}: {1}" -f (Get-UiText "LicensePrefix"), $licenseText)
   $licenseInfoLabel.Visible = $true
   $titleMetaToolTip.SetToolTip($licenseInfoLabel, (Get-LicenseDescription -LicenseId ([string]$repoInfo.License) -LicenseName $licenseText))
-  $descriptionBrowser.DocumentText = (Convert-MarkdownToHtml -Markdown ([string]$repoInfo.Description))
+  $descriptionBrowser.Text = (Convert-MarkdownToDisplayText -Markdown ([string]$repoInfo.Description))
   $script:repoFiles = @($repoInfo.Files)
   if ($script:repoFiles.Count -eq 0) {
     $saveTextBox.Text = ""

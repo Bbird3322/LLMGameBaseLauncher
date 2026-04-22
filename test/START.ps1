@@ -104,7 +104,8 @@ function Start-StartupPopupProcess {
     "-WindowStyle", "Hidden",
     "-File", $popupScript,
     "-SignalPath", $signalPath,
-    "-Message", "Launcher starting"
+    "-Message", "Launcher starting",
+    "-RootDir", $RootDir
   ) -WorkingDirectory $RootDir -PassThru
 
   return [pscustomobject]@{
